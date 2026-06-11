@@ -11,6 +11,24 @@
 #include <QVector>
 
 /*
+ * DeckOverview 是牌库首页需要展示的一张“牌组卡片”。
+ *
+ * 它不是数据库表，只是把 SQL 统计结果打包给 ReviewWidget 使用：
+ * totalCards 表示牌组总卡片数，dueCards 表示今天到期数量，
+ * reviewedCards 表示至少复习过一次的卡片数。
+ */
+class DeckOverview
+{
+public:
+    QString group;
+    QString deck;
+    QString color;
+    int totalCards = 0;
+    int dueCards = 0;
+    int reviewedCards = 0;
+};
+
+/*
  * DatabaseManager 是项目里的数据库访问层。
  *
  * MainWindow、TaskDialog 等界面类不应该关心 SQL 语句怎么写，
@@ -46,14 +64,25 @@ public:
     bool addFlashCard(const QString &front,
                       const QString &back,
                       const QString &tag,
+                      const QString &group = "默认分组",
                       const QString &deck = "默认牌组",
                       const QString &cardColor = "#ffffff");
-    QVector<FlashCard> getDueFlashCards(const QString &deck = QString());
-    QStringList getFlashCardDecks();
-    bool addFlashCardDeck(const QString &deck);
+    QVector<FlashCard> getDueFlashCards(const QString &deck = QString(),
+                                         const QString &group = QString());
+    QVector<FlashCard> getFlashCardsByDeck(const QString &deck,
+                                           const QString &group = QString());
+    QStringList getFlashCardGroups();
+    QStringList getFlashCardDecks(const QString &group = QString());
+    QVector<DeckOverview> getFlashCardDeckOverviews(const QString &group = QString(),
+                                                    const QString &keyword = QString());
+    bool addFlashCardGroup(const QString &group);
+    bool addFlashCardDeck(const QString &deck, const QString &group = "默认分组");
+    bool deleteFlashCardGroup(const QString &group);
+    bool deleteFlashCardDeck(const QString &deck, const QString &group = "默认分组");
     bool updateFlashCardAfterReview(int cardId, int rating);
     bool deleteFlashCard(int cardId);
     int importFlashCardsFromTextFile(const QString &filePath,
+                                     const QString &group = "默认分组",
                                      const QString &deck = "默认牌组",
                                      const QString &cardColor = "#ffffff");
 
@@ -64,8 +93,14 @@ private:
     // 初始化复习卡片表；不会影响已有任务表。
     bool createFlashcardsTable();
 
+    // 初始化牌库分组表；允许空分组先创建出来。
+    bool createFlashCardGroupsTable();
+
     // 初始化牌组表；允许没有卡片的牌组也能保存。
     bool createFlashCardDecksTable();
+
+    // 为常用查询字段创建索引，提升到期复习、牌组筛选和导入去重速度。
+    bool createFlashCardIndexes();
 
     // 兼容旧版本数据库：如果 flashcards 表还没有导入来源字段，就自动添加。
     bool ensureFlashCardSourceColumns();
@@ -73,8 +108,14 @@ private:
     // 兼容旧版本数据库：如果 flashcards 表还没有 deck 字段，就自动添加。
     bool ensureFlashCardDeckColumn();
 
+    // 兼容旧版本数据库：如果 flashcards 表还没有 card_group 字段，就自动添加。
+    bool ensureFlashCardGroupColumn();
+
     // 兼容旧版本数据库：如果 flashcards 表还没有 card_color 字段，就自动添加。
     bool ensureFlashCardColorColumn();
+
+    // 兼容旧版本数据库：如果 flashcard_decks 表还没有 group_name 字段，就自动添加。
+    bool ensureFlashCardDeckGroupColumn();
 
     // 兼容旧版本数据库：如果 tasks 表还没有 progress 字段，就自动添加。
     bool ensureProgressColumn();

@@ -8,17 +8,24 @@
 #include <QVector>
 
 class DatabaseManager;
-class QComboBox;
+class DeckOverview;
 class QFrame;
+class QHBoxLayout;
 class QLabel;
+class QLineEdit;
 class QPushButton;
+class QScrollArea;
 class QTextEdit;
+class QVBoxLayout;
 
 /*
- * ReviewWidget 是一个轻量版 Anki 复习子界面。
+ * ReviewWidget 是 StudyPlanner 里的 Anki 风格复习页面。
  *
- * 它负责复习流程和添加卡片入口，但不直接写 SQL。
- * 所有卡片数据都通过 DatabaseManager 读取和保存。
+ * 它现在包含两个层次：
+ * 1. 牌库首页：按“分组 -> 牌组”展示可视化牌组卡片。
+ * 2. 复习页面：显示正面、背面和四个反馈按钮。
+ *
+ * ReviewWidget 只负责界面和流程，所有 SQL 都交给 DatabaseManager。
  */
 class ReviewWidget : public QWidget
 {
@@ -27,7 +34,7 @@ class ReviewWidget : public QWidget
 public:
     explicit ReviewWidget(DatabaseManager *databaseManager, QWidget *parent = nullptr);
 
-    // 每次打开复习页时重新读取今日到期卡片，避免显示旧数据。
+    // MainWindow 切到 Anki 页面时调用，默认回到牌库首页并刷新统计。
     void reloadCards();
 
 signals:
@@ -38,13 +45,31 @@ private:
     void setupUi();
     void setupStyleSheet();
     void connectSignals();
+
+    void reloadGroups();
     void reloadDecks();
-    QString selectedDeckFilter() const;
+    void reloadDeckLibrary();
+    void clearDeckList();
+    void addDeckCard(const DeckOverview &overview);
+    void clearCardList();
+    void addCardPreview(const FlashCard &card);
+
+    void showLibrary();
+    void showDeckDetail(const QString &group, const QString &deck);
+    void showReviewArea();
+    void startDeckReview(const QString &group, const QString &deck);
+
+    QString selectedGroupForNewCards() const;
     QString selectedDeckForNewCards() const;
     void applyCardColor(const QString &cardColor);
+
+    void createGroup();
     void createDeck();
+    void deleteCurrentGroup();
+    void deleteDeck(const DeckOverview &overview);
     void addCard();
     void importCardsFromFile();
+
     void showCurrentCard();
     void showEmptyState();
     void showAnswer();
@@ -53,23 +78,44 @@ private:
 
     DatabaseManager *m_databaseManager;
     QVector<FlashCard> m_cards;
+    QVector<FlashCard> m_deckCards;
+    QStringList m_groups;
     QStringList m_decks;
+    QString m_currentGroup;
+    QString m_currentDeck;
     int m_currentIndex;
 
     QLabel *m_titleLabel;
     QLabel *m_statusLabel;
     QLabel *m_tagLabel;
-    QLabel *m_deckLabel;
-    QLabel *m_backSideTitleLabel;
-    QComboBox *m_deckCombo;
-    QFrame *m_cardFrame;
-    QTextEdit *m_frontEdit;
-    QTextEdit *m_backEdit;
-    QPushButton *m_showAnswerButton;
+
+    QWidget *m_libraryWidget;
+    QLineEdit *m_searchEdit;
+    QHBoxLayout *m_groupTabsLayout;
+    QScrollArea *m_deckScrollArea;
+    QWidget *m_deckListWidget;
+    QVBoxLayout *m_deckListLayout;
+    QPushButton *m_newGroupButton;
     QPushButton *m_newDeckButton;
+    QPushButton *m_deleteGroupButton;
     QPushButton *m_addCardButton;
     QPushButton *m_importCardButton;
     QPushButton *m_backToPlannerButton;
+
+    QWidget *m_deckDetailWidget;
+    QScrollArea *m_cardListScrollArea;
+    QWidget *m_cardListWidget;
+    QVBoxLayout *m_cardListLayout;
+    QPushButton *m_backFromDetailButton;
+    QPushButton *m_startReviewFromDetailButton;
+
+    QWidget *m_reviewAreaWidget;
+    QLabel *m_backSideTitleLabel;
+    QFrame *m_cardFrame;
+    QTextEdit *m_frontEdit;
+    QTextEdit *m_backEdit;
+    QPushButton *m_backToLibraryButton;
+    QPushButton *m_showAnswerButton;
     QPushButton *m_forgetButton;
     QPushButton *m_blurryButton;
     QPushButton *m_rememberButton;

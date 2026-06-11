@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 
 /*
  * 程序入口。
@@ -13,6 +14,8 @@
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+    QCoreApplication::setOrganizationName("StudyPlanner");
+    QCoreApplication::setApplicationName("StudyPlanner");
 
     MainWindow window;
     window.resize(1000, 650);

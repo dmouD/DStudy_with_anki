@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QSqlError>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
@@ -70,6 +71,12 @@ QString normalizedDeckName(const QString &deck)
     return trimmedDeck.isEmpty() || trimmedDeck == "全部牌组" ? QString("默认牌组") : trimmedDeck;
 }
 
+QString normalizedGroupName(const QString &group)
+{
+    const QString trimmedGroup = group.trimmed();
+    return trimmedGroup.isEmpty() || trimmedGroup == "全部分组" ? QString("默认分组") : trimmedGroup;
+}
+
 QString normalizedCardColor(const QString &cardColor)
 {
     const QString trimmedColor = cardColor.trimmed();
@@ -103,12 +110,34 @@ DatabaseManager::~DatabaseManager()
 bool DatabaseManager::initialize()
 {
     /*
-     * planner.db 放在可执行文件所在目录。
-     * 使用 Qt Creator 运行时，它通常位于 build 目录中。
+     * planner.db 放在用户数据目录，而不是可执行文件目录。
+     * 这样安装到只读目录时也能正常写入，并且更符合跨平台应用习惯。
+     *
+     * 如果旧版本曾经把 planner.db 放在 build/可执行文件目录，
+     * 这里会在新位置没有数据库时复制旧文件，尽量保留已有数据。
      */
-    const QString databasePath = QCoreApplication::applicationDirPath()
-                                 + QDir::separator()
-                                 + "planner.db";
+    QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dataPath.isEmpty()) {
+        dataPath = QCoreApplication::applicationDirPath();
+    }
+
+    if (!QDir().mkpath(dataPath)) {
+        qDebug() << "创建数据目录失败:" << dataPath;
+        return false;
+    }
+
+    const QString databasePath = dataPath + QDir::separator() + "planner.db";
+    const QString legacyDatabasePath = QCoreApplication::applicationDirPath()
+                                       + QDir::separator()
+                                       + "planner.db";
+
+    if (databasePath != legacyDatabasePath
+        && !QFile::exists(databasePath)
+        && QFile::exists(legacyDatabasePath)) {
+        if (!QFile::copy(legacyDatabasePath, databasePath)) {
+            qDebug() << "迁移旧数据库失败，旧路径:" << legacyDatabasePath << "新路径:" << databasePath;
+        }
+    }
 
     m_database.setDatabaseName(databasePath);
 
@@ -117,7 +146,10 @@ bool DatabaseManager::initialize()
         return false;
     }
 
-    return createTasksTable() && createFlashcardsTable() && createFlashCardDecksTable();
+    return createTasksTable()
+           && createFlashCardGroupsTable()
+           && createFlashcardsTable()
+           && createFlashCardDecksTable();
 }
 
 bool DatabaseManager::createTasksTable()
@@ -175,6 +207,7 @@ bool DatabaseManager::createFlashcardsTable()
             front TEXT NOT NULL,
             back TEXT NOT NULL,
             tag TEXT,
+            card_group TEXT DEFAULT '默认分组',
             deck TEXT DEFAULT '默认牌组',
             card_color TEXT DEFAULT '#ffffff',
             due_time TEXT NOT NULL,
@@ -193,8 +226,67 @@ bool DatabaseManager::createFlashcardsTable()
     }
 
     return ensureFlashCardSourceColumns()
+           && ensureFlashCardGroupColumn()
            && ensureFlashCardDeckColumn()
-           && ensureFlashCardColorColumn();
+           && ensureFlashCardColorColumn()
+           && createFlashCardIndexes();
+}
+
+bool DatabaseManager::createFlashCardIndexes()
+{
+    /*
+     * due_time 和 deck 是 ReviewWidget 最常用的筛选字段。
+     * source/source_id 用于文本导入时检测重复卡片。
+     */
+    QSqlQuery dueIndexQuery(m_database);
+    if (!dueIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_flashcards_due_time ON flashcards(due_time)")) {
+        qDebug() << "创建 flashcards.due_time 索引失败:" << dueIndexQuery.lastError().text();
+        return false;
+    }
+
+    QSqlQuery deckIndexQuery(m_database);
+    if (!deckIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_flashcards_deck ON flashcards(deck)")) {
+        qDebug() << "创建 flashcards.deck 索引失败:" << deckIndexQuery.lastError().text();
+        return false;
+    }
+
+    QSqlQuery groupDeckIndexQuery(m_database);
+    if (!groupDeckIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_flashcards_group_deck ON flashcards(card_group, deck)")) {
+        qDebug() << "创建 flashcards.card_group/deck 索引失败:" << groupDeckIndexQuery.lastError().text();
+        return false;
+    }
+
+    QSqlQuery sourceIndexQuery(m_database);
+    if (!sourceIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_flashcards_source ON flashcards(source, source_id)")) {
+        qDebug() << "创建 flashcards.source/source_id 索引失败:" << sourceIndexQuery.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::createFlashCardGroupsTable()
+{
+    QSqlQuery query(m_database);
+
+    /*
+     * flashcard_groups 保存牌库分组。
+     * 分组可以先创建，之后再往分组里创建牌组和卡片。
+     */
+    const QString sql = R"(
+        CREATE TABLE IF NOT EXISTS flashcard_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
+    )";
+
+    if (!query.exec(sql)) {
+        qDebug() << "创建 flashcard_groups 表失败:" << query.lastError().text();
+        return false;
+    }
+
+    return addFlashCardGroup("默认分组");
 }
 
 bool DatabaseManager::createFlashCardDecksTable()
@@ -204,11 +296,13 @@ bool DatabaseManager::createFlashCardDecksTable()
     /*
      * flashcard_decks 专门保存牌组名。
      * 这样即使牌组暂时没有卡片，也能在下拉框中显示。
+     * group_name 表示这个牌组属于哪个牌库分组。
      */
     const QString sql = R"(
         CREATE TABLE IF NOT EXISTS flashcard_decks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+            group_name TEXT DEFAULT '默认分组',
             created_at TEXT NOT NULL
         );
     )";
@@ -218,7 +312,48 @@ bool DatabaseManager::createFlashCardDecksTable()
         return false;
     }
 
-    return addFlashCardDeck("默认牌组");
+    if (!ensureFlashCardDeckGroupColumn()) {
+        return false;
+    }
+
+    /*
+     * 把旧版本只保存在 flashcards.deck 里的牌组同步到 flashcard_decks。
+     * INSERT OR IGNORE 保证重复启动不会产生重复记录。
+     */
+    QSqlQuery migrateDeckQuery(m_database);
+    migrateDeckQuery.prepare(R"(
+        INSERT OR IGNORE INTO flashcard_decks (name, group_name, created_at)
+        SELECT DISTINCT
+               COALESCE(NULLIF(deck, ''), '默认牌组'),
+               COALESCE(NULLIF(card_group, ''), '默认分组'),
+               :created_at
+        FROM flashcards
+    )");
+    migrateDeckQuery.bindValue(":created_at", QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!migrateDeckQuery.exec()) {
+        qDebug() << "迁移旧复习牌组失败:" << migrateDeckQuery.lastError().text();
+        return false;
+    }
+
+    QSqlQuery migrateGroupQuery(m_database);
+    migrateGroupQuery.prepare(R"(
+        INSERT OR IGNORE INTO flashcard_groups (name, created_at)
+        SELECT DISTINCT COALESCE(NULLIF(group_name, ''), '默认分组'), :created_at
+        FROM flashcard_decks
+    )");
+    migrateGroupQuery.bindValue(":created_at", QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!migrateGroupQuery.exec()) {
+        qDebug() << "迁移旧复习分组失败:" << migrateGroupQuery.lastError().text();
+        return false;
+    }
+
+    QSqlQuery deckGroupIndexQuery(m_database);
+    if (!deckGroupIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_flashcard_decks_group ON flashcard_decks(group_name)")) {
+        qDebug() << "创建 flashcard_decks.group_name 索引失败:" << deckGroupIndexQuery.lastError().text();
+        return false;
+    }
+
+    return addFlashCardDeck("默认牌组", "默认分组");
 }
 
 bool DatabaseManager::ensureFlashCardDeckColumn()
@@ -259,6 +394,44 @@ bool DatabaseManager::ensureFlashCardDeckColumn()
     return true;
 }
 
+bool DatabaseManager::ensureFlashCardGroupColumn()
+{
+    /*
+     * card_group 是新增的“牌库分组”字段。
+     * 旧卡片统一归入默认分组，后续用户可以在界面里继续创建更多分组。
+     */
+    QSqlQuery tableInfoQuery(m_database);
+    if (!tableInfoQuery.exec("PRAGMA table_info(flashcards)")) {
+        qDebug() << "读取 flashcards 表结构失败:" << tableInfoQuery.lastError().text();
+        return false;
+    }
+
+    bool hasGroupColumn = false;
+    while (tableInfoQuery.next()) {
+        const QString columnName = tableInfoQuery.value(1).toString();
+        if (columnName == "card_group") {
+            hasGroupColumn = true;
+            break;
+        }
+    }
+
+    if (!hasGroupColumn) {
+        QSqlQuery alterQuery(m_database);
+        if (!alterQuery.exec("ALTER TABLE flashcards ADD COLUMN card_group TEXT DEFAULT '默认分组'")) {
+            qDebug() << "添加 flashcards.card_group 字段失败:" << alterQuery.lastError().text();
+            return false;
+        }
+    }
+
+    QSqlQuery backfillQuery(m_database);
+    if (!backfillQuery.exec("UPDATE flashcards SET card_group = '默认分组' WHERE card_group IS NULL OR card_group = ''")) {
+        qDebug() << "初始化 flashcards.card_group 字段失败:" << backfillQuery.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
 bool DatabaseManager::ensureFlashCardColorColumn()
 {
     /*
@@ -291,6 +464,44 @@ bool DatabaseManager::ensureFlashCardColorColumn()
     QSqlQuery backfillQuery(m_database);
     if (!backfillQuery.exec("UPDATE flashcards SET card_color = '#ffffff' WHERE card_color IS NULL OR card_color = ''")) {
         qDebug() << "初始化 flashcards.card_color 字段失败:" << backfillQuery.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::ensureFlashCardDeckGroupColumn()
+{
+    /*
+     * flashcard_decks.group_name 让空牌组也能归属到某个分组。
+     * 老数据库里的牌组会自动补到默认分组。
+     */
+    QSqlQuery tableInfoQuery(m_database);
+    if (!tableInfoQuery.exec("PRAGMA table_info(flashcard_decks)")) {
+        qDebug() << "读取 flashcard_decks 表结构失败:" << tableInfoQuery.lastError().text();
+        return false;
+    }
+
+    bool hasGroupColumn = false;
+    while (tableInfoQuery.next()) {
+        const QString columnName = tableInfoQuery.value(1).toString();
+        if (columnName == "group_name") {
+            hasGroupColumn = true;
+            break;
+        }
+    }
+
+    if (!hasGroupColumn) {
+        QSqlQuery alterQuery(m_database);
+        if (!alterQuery.exec("ALTER TABLE flashcard_decks ADD COLUMN group_name TEXT DEFAULT '默认分组'")) {
+            qDebug() << "添加 flashcard_decks.group_name 字段失败:" << alterQuery.lastError().text();
+            return false;
+        }
+    }
+
+    QSqlQuery backfillQuery(m_database);
+    if (!backfillQuery.exec("UPDATE flashcard_decks SET group_name = '默认分组' WHERE group_name IS NULL OR group_name = ''")) {
+        qDebug() << "初始化 flashcard_decks.group_name 字段失败:" << backfillQuery.lastError().text();
         return false;
     }
 
@@ -742,6 +953,7 @@ bool DatabaseManager::toggleTaskDone(int id)
 bool DatabaseManager::addFlashCard(const QString &front,
                                    const QString &back,
                                    const QString &tag,
+                                   const QString &group,
                                    const QString &deck,
                                    const QString &cardColor)
 {
@@ -751,17 +963,20 @@ bool DatabaseManager::addFlashCard(const QString &front,
      * 新卡片默认立即到期，这样用户刚添加后就可以马上在 ReviewWidget 中复习。
     */
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    const QString groupName = normalizedGroupName(group);
     const QString deckName = normalizedDeckName(deck);
     const QString color = normalizedCardColor(cardColor);
-    addFlashCardDeck(deckName);
+    addFlashCardGroup(groupName);
+    addFlashCardDeck(deckName, groupName);
 
     query.prepare(R"(
-        INSERT INTO flashcards (front, back, tag, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id)
-        VALUES (:front, :back, :tag, :deck, :card_color, :due_time, :interval_days, :ease_factor, :review_count, :created_at, :source, :source_id)
+        INSERT INTO flashcards (front, back, tag, card_group, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id)
+        VALUES (:front, :back, :tag, :card_group, :deck, :card_color, :due_time, :interval_days, :ease_factor, :review_count, :created_at, :source, :source_id)
     )");
     query.bindValue(":front", front.trimmed());
     query.bindValue(":back", back.trimmed());
     query.bindValue(":tag", tag.trimmed());
+    query.bindValue(":card_group", groupName);
     query.bindValue(":deck", deckName);
     query.bindValue(":card_color", color);
     query.bindValue(":due_time", now);
@@ -780,7 +995,10 @@ bool DatabaseManager::addFlashCard(const QString &front,
     return true;
 }
 
-int DatabaseManager::importFlashCardsFromTextFile(const QString &filePath, const QString &deck, const QString &cardColor)
+int DatabaseManager::importFlashCardsFromTextFile(const QString &filePath,
+                                                  const QString &group,
+                                                  const QString &deck,
+                                                  const QString &cardColor)
 {
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -791,16 +1009,32 @@ int DatabaseManager::importFlashCardsFromTextFile(const QString &filePath, const
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
 
-    QSqlQuery query(m_database);
-    query.prepare(R"(
-        INSERT INTO flashcards (front, back, tag, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id)
-        VALUES (:front, :back, :tag, :deck, :card_color, :due_time, :interval_days, :ease_factor, :review_count, :created_at, :source, :source_id)
+    if (!m_database.transaction()) {
+        qDebug() << "开始 Anki 文本导入事务失败:" << m_database.lastError().text();
+        return -1;
+    }
+
+    QSqlQuery duplicateQuery(m_database);
+    duplicateQuery.prepare(R"(
+        SELECT id
+        FROM flashcards
+        WHERE source = :source
+          AND source_id = :source_id
+        LIMIT 1
+    )");
+
+    QSqlQuery insertQuery(m_database);
+    insertQuery.prepare(R"(
+        INSERT INTO flashcards (front, back, tag, card_group, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id)
+        VALUES (:front, :back, :tag, :card_group, :deck, :card_color, :due_time, :interval_days, :ease_factor, :review_count, :created_at, :source, :source_id)
     )");
 
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    const QString groupName = normalizedGroupName(group);
     const QString deckName = normalizedDeckName(deck);
     const QString color = normalizedCardColor(cardColor);
-    addFlashCardDeck(deckName);
+    addFlashCardGroup(groupName);
+    addFlashCardDeck(deckName, groupName);
     int importedCount = 0;
     int lineNumber = 0;
 
@@ -831,45 +1065,68 @@ int DatabaseManager::importFlashCardsFromTextFile(const QString &filePath, const
             continue;
         }
 
-        query.bindValue(":front", front);
-        query.bindValue(":back", back);
-        query.bindValue(":tag", tag);
-        query.bindValue(":deck", deckName);
-        query.bindValue(":card_color", color);
-        query.bindValue(":due_time", now);
-        query.bindValue(":interval_days", 1);
-        query.bindValue(":ease_factor", 2.5);
-        query.bindValue(":review_count", 0);
-        query.bindValue(":created_at", now);
-        query.bindValue(":source", "anki_txt");
-        query.bindValue(":source_id", flashCardSourceId(front, back));
+        const QString sourceId = flashCardSourceId(front, back);
 
-        if (!query.exec()) {
-            qDebug() << "导入 Anki 文本卡片失败，行号:" << lineNumber << query.lastError().text();
+        duplicateQuery.bindValue(":source", "anki_txt");
+        duplicateQuery.bindValue(":source_id", sourceId);
+        if (!duplicateQuery.exec()) {
+            qDebug() << "检查 Anki 文本重复卡片失败，行号:" << lineNumber << duplicateQuery.lastError().text();
+            continue;
+        }
+        if (duplicateQuery.next()) {
+            continue;
+        }
+
+        insertQuery.bindValue(":front", front);
+        insertQuery.bindValue(":back", back);
+        insertQuery.bindValue(":tag", tag);
+        insertQuery.bindValue(":card_group", groupName);
+        insertQuery.bindValue(":deck", deckName);
+        insertQuery.bindValue(":card_color", color);
+        insertQuery.bindValue(":due_time", now);
+        insertQuery.bindValue(":interval_days", 1);
+        insertQuery.bindValue(":ease_factor", 2.5);
+        insertQuery.bindValue(":review_count", 0);
+        insertQuery.bindValue(":created_at", now);
+        insertQuery.bindValue(":source", "anki_txt");
+        insertQuery.bindValue(":source_id", sourceId);
+
+        if (!insertQuery.exec()) {
+            qDebug() << "导入 Anki 文本卡片失败，行号:" << lineNumber << insertQuery.lastError().text();
             continue;
         }
 
         ++importedCount;
     }
 
+    if (!m_database.commit()) {
+        qDebug() << "提交 Anki 文本导入事务失败:" << m_database.lastError().text();
+        m_database.rollback();
+        return -1;
+    }
+
     return importedCount;
 }
 
-QVector<FlashCard> DatabaseManager::getDueFlashCards(const QString &deck)
+QVector<FlashCard> DatabaseManager::getDueFlashCards(const QString &deck, const QString &group)
 {
     QVector<FlashCard> cards;
     QSqlQuery query(m_database);
     const QString deckName = deck.trimmed();
+    const QString groupName = group.trimmed();
 
     /*
      * 只读取 due_time 小于等于当前时间的卡片。
      * ORDER BY due_time, id 可以让更早到期的卡片排在前面。
      */
     QString sql = R"(
-        SELECT id, front, back, tag, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id
+        SELECT id, front, back, tag, card_group, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id
         FROM flashcards
         WHERE due_time <= :now
     )";
+    if (!groupName.isEmpty()) {
+        sql += " AND card_group = :card_group";
+    }
     if (!deckName.isEmpty()) {
         sql += " AND deck = :deck";
     }
@@ -877,6 +1134,9 @@ QVector<FlashCard> DatabaseManager::getDueFlashCards(const QString &deck)
 
     query.prepare(sql);
     query.bindValue(":now", QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!groupName.isEmpty()) {
+        query.bindValue(":card_group", normalizedGroupName(groupName));
+    }
     if (!deckName.isEmpty()) {
         query.bindValue(":deck", normalizedDeckName(deckName));
     }
@@ -893,20 +1153,105 @@ QVector<FlashCard> DatabaseManager::getDueFlashCards(const QString &deck)
     return cards;
 }
 
-QStringList DatabaseManager::getFlashCardDecks()
+QVector<FlashCard> DatabaseManager::getFlashCardsByDeck(const QString &deck, const QString &group)
 {
-    QStringList decks;
-    decks.append("默认牌组");
+    QVector<FlashCard> cards;
+    QSqlQuery query(m_database);
+    const QString deckName = normalizedDeckName(deck);
+    const QString groupName = group.trimmed();
+
+    /*
+     * 牌组详情页需要显示这个牌组中的全部卡片，
+     * 不限制 due_time，这和“今日复习”查询是两个不同入口。
+     */
+    QString sql = R"(
+        SELECT id, front, back, tag, card_group, deck, card_color, due_time, interval_days, ease_factor, review_count, created_at, source, source_id
+        FROM flashcards
+        WHERE deck = :deck
+    )";
+    if (!groupName.isEmpty()) {
+        sql += " AND card_group = :card_group";
+    }
+    sql += " ORDER BY id DESC";
+
+    query.prepare(sql);
+    query.bindValue(":deck", deckName);
+    if (!groupName.isEmpty()) {
+        query.bindValue(":card_group", normalizedGroupName(groupName));
+    }
+
+    if (!query.exec()) {
+        qDebug() << "查询牌组卡片失败:" << query.lastError().text();
+        return cards;
+    }
+
+    while (query.next()) {
+        cards.append(flashCardFromQuery(query));
+    }
+
+    return cards;
+}
+
+QStringList DatabaseManager::getFlashCardGroups()
+{
+    QStringList groups;
+    groups.append("默认分组");
 
     QSqlQuery query(m_database);
     if (!query.exec(R"(
+        SELECT name AS group_name
+        FROM flashcard_groups
+        UNION
+        SELECT COALESCE(NULLIF(group_name, ''), '默认分组') AS group_name
+        FROM flashcard_decks
+        UNION
+        SELECT COALESCE(NULLIF(card_group, ''), '默认分组') AS group_name
+        FROM flashcards
+        ORDER BY group_name
+    )")) {
+        qDebug() << "查询复习分组失败:" << query.lastError().text();
+        return groups;
+    }
+
+    while (query.next()) {
+        const QString groupName = normalizedGroupName(query.value(0).toString());
+        if (!groups.contains(groupName)) {
+            groups.append(groupName);
+        }
+    }
+
+    return groups;
+}
+
+QStringList DatabaseManager::getFlashCardDecks(const QString &group)
+{
+    QStringList decks;
+
+    QSqlQuery query(m_database);
+    const QString groupName = group.trimmed();
+    QString sql = R"(
         SELECT name AS deck_name
         FROM flashcard_decks
+    )";
+    if (!groupName.isEmpty()) {
+        sql += " WHERE group_name = :group_name";
+    }
+    sql += R"(
         UNION
         SELECT COALESCE(NULLIF(deck, ''), '默认牌组') AS deck_name
         FROM flashcards
-        ORDER BY deck_name
-    )")) {
+    )";
+    if (!groupName.isEmpty()) {
+        sql += " WHERE card_group = :group_name";
+    }
+    sql += " ORDER BY deck_name";
+
+    query.prepare(sql);
+    if (!groupName.isEmpty()) {
+        query.bindValue(":group_name", normalizedGroupName(groupName));
+    }
+
+    if (!query.exec()) {
         qDebug() << "查询复习牌组失败:" << query.lastError().text();
         return decks;
     }
@@ -918,24 +1263,227 @@ QStringList DatabaseManager::getFlashCardDecks()
         }
     }
 
+    if (decks.isEmpty()) {
+        decks.append("默认牌组");
+    }
+
     return decks;
 }
 
-bool DatabaseManager::addFlashCardDeck(const QString &deck)
+QVector<DeckOverview> DatabaseManager::getFlashCardDeckOverviews(const QString &group, const QString &keyword)
+{
+    QVector<DeckOverview> overviews;
+    QSqlQuery query(m_database);
+    const QString groupName = group.trimmed();
+    const QString keywordText = keyword.trimmed();
+
+    /*
+     * 左连接保证“空牌组”也会出现在牌库里。
+     * dueCards 用 due_time <= 当前时间统计今日到期卡片。
+     */
+    QString sql = R"(
+        WITH deck_source AS (
+            SELECT COALESCE(NULLIF(group_name, ''), '默认分组') AS group_name,
+                   COALESCE(NULLIF(name, ''), '默认牌组') AS name,
+                   created_at
+            FROM flashcard_decks
+            UNION ALL
+            SELECT COALESCE(NULLIF(card_group, ''), '默认分组') AS group_name,
+                   COALESCE(NULLIF(deck, ''), '默认牌组') AS name,
+                   MIN(created_at) AS created_at
+            FROM flashcards
+            GROUP BY COALESCE(NULLIF(card_group, ''), '默认分组'),
+                     COALESCE(NULLIF(deck, ''), '默认牌组')
+        ),
+        deck_base AS (
+            SELECT group_name,
+                   name,
+                   MIN(created_at) AS created_at
+            FROM deck_source
+            GROUP BY group_name, name
+        )
+        SELECT d.group_name,
+               d.name,
+               COALESCE(MIN(NULLIF(f.card_color, '')), '#ffffff') AS color,
+               COUNT(f.id) AS total_cards,
+               COALESCE(SUM(CASE WHEN f.due_time <= :now THEN 1 ELSE 0 END), 0) AS due_cards,
+               COALESCE(SUM(CASE WHEN f.review_count > 0 THEN 1 ELSE 0 END), 0) AS reviewed_cards
+        FROM deck_base d
+        LEFT JOIN flashcards f
+               ON f.deck = d.name
+              AND f.card_group = d.group_name
+        WHERE 1 = 1
+    )";
+    if (!groupName.isEmpty()) {
+        sql += " AND d.group_name = :group_name";
+    }
+    if (!keywordText.isEmpty()) {
+        sql += " AND d.name LIKE :keyword";
+    }
+    sql += R"(
+        GROUP BY d.group_name, d.name
+        ORDER BY d.group_name, d.created_at, d.name
+    )";
+
+    query.prepare(sql);
+    query.bindValue(":now", QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!groupName.isEmpty()) {
+        query.bindValue(":group_name", normalizedGroupName(groupName));
+    }
+    if (!keywordText.isEmpty()) {
+        query.bindValue(":keyword", "%" + keywordText + "%");
+    }
+
+    if (!query.exec()) {
+        qDebug() << "查询复习牌组概览失败:" << query.lastError().text();
+        return overviews;
+    }
+
+    while (query.next()) {
+        DeckOverview overview;
+        overview.group = normalizedGroupName(query.value(0).toString());
+        overview.deck = normalizedDeckName(query.value(1).toString());
+        overview.color = normalizedCardColor(query.value(2).toString());
+        overview.totalCards = qMax(0, query.value(3).toInt());
+        overview.dueCards = qMax(0, query.value(4).toInt());
+        overview.reviewedCards = qMax(0, query.value(5).toInt());
+        overviews.append(overview);
+    }
+
+    return overviews;
+}
+
+bool DatabaseManager::addFlashCardGroup(const QString &group)
 {
     QSqlQuery query(m_database);
-    const QString deckName = normalizedDeckName(deck);
+    const QString groupName = normalizedGroupName(group);
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
 
     query.prepare(R"(
-        INSERT OR IGNORE INTO flashcard_decks (name, created_at)
+        INSERT OR IGNORE INTO flashcard_groups (name, created_at)
         VALUES (:name, :created_at)
     )");
+    query.bindValue(":name", groupName);
+    query.bindValue(":created_at", now);
+
+    if (!query.exec()) {
+        qDebug() << "添加复习分组失败:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::addFlashCardDeck(const QString &deck, const QString &group)
+{
+    QSqlQuery query(m_database);
+    const QString deckName = normalizedDeckName(deck);
+    const QString groupName = normalizedGroupName(group);
+    const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    addFlashCardGroup(groupName);
+
+    query.prepare(R"(
+        INSERT OR IGNORE INTO flashcard_decks (name, group_name, created_at)
+        VALUES (:name, :group_name, :created_at)
+    )");
     query.bindValue(":name", deckName);
+    query.bindValue(":group_name", groupName);
     query.bindValue(":created_at", now);
 
     if (!query.exec()) {
         qDebug() << "添加复习牌组失败:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::deleteFlashCardGroup(const QString &group)
+{
+    const QString groupName = normalizedGroupName(group);
+
+    if (!m_database.transaction()) {
+        qDebug() << "开始删除复习分组事务失败:" << m_database.lastError().text();
+        return false;
+    }
+
+    QSqlQuery deleteCardsQuery(m_database);
+    deleteCardsQuery.prepare("DELETE FROM flashcards WHERE card_group = :card_group");
+    deleteCardsQuery.bindValue(":card_group", groupName);
+    if (!deleteCardsQuery.exec()) {
+        qDebug() << "删除复习分组内卡片失败:" << deleteCardsQuery.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    QSqlQuery deleteDecksQuery(m_database);
+    deleteDecksQuery.prepare("DELETE FROM flashcard_decks WHERE group_name = :group_name");
+    deleteDecksQuery.bindValue(":group_name", groupName);
+    if (!deleteDecksQuery.exec()) {
+        qDebug() << "删除复习分组内牌组失败:" << deleteDecksQuery.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    QSqlQuery deleteGroupQuery(m_database);
+    deleteGroupQuery.prepare("DELETE FROM flashcard_groups WHERE name = :name");
+    deleteGroupQuery.bindValue(":name", groupName);
+    if (!deleteGroupQuery.exec()) {
+        qDebug() << "删除复习分组失败:" << deleteGroupQuery.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    if (!m_database.commit()) {
+        qDebug() << "提交删除复习分组事务失败:" << m_database.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::deleteFlashCardDeck(const QString &deck, const QString &group)
+{
+    const QString deckName = normalizedDeckName(deck);
+    const QString groupName = normalizedGroupName(group);
+
+    if (!m_database.transaction()) {
+        qDebug() << "开始删除复习牌组事务失败:" << m_database.lastError().text();
+        return false;
+    }
+
+    QSqlQuery deleteCardsQuery(m_database);
+    deleteCardsQuery.prepare(R"(
+        DELETE FROM flashcards
+        WHERE card_group = :card_group
+          AND deck = :deck
+    )");
+    deleteCardsQuery.bindValue(":card_group", groupName);
+    deleteCardsQuery.bindValue(":deck", deckName);
+    if (!deleteCardsQuery.exec()) {
+        qDebug() << "删除复习牌组内卡片失败:" << deleteCardsQuery.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    QSqlQuery deleteDeckQuery(m_database);
+    deleteDeckQuery.prepare(R"(
+        DELETE FROM flashcard_decks
+        WHERE group_name = :group_name
+          AND name = :name
+    )");
+    deleteDeckQuery.bindValue(":group_name", groupName);
+    deleteDeckQuery.bindValue(":name", deckName);
+    if (!deleteDeckQuery.exec()) {
+        qDebug() << "删除复习牌组失败:" << deleteDeckQuery.lastError().text();
+        m_database.rollback();
+        return false;
+    }
+
+    if (!m_database.commit()) {
+        qDebug() << "提交删除复习牌组事务失败:" << m_database.lastError().text();
+        m_database.rollback();
         return false;
     }
 
@@ -1063,23 +1611,24 @@ FlashCard DatabaseManager::flashCardFromQuery(const QSqlQuery &query) const
 {
     /*
      * 这里按 SELECT 字段顺序取值：
-     * 0 id, 1 front, 2 back, 3 tag, 4 deck, 5 card_color,
-     * 6 due_time, 7 interval_days, 8 ease_factor, 9 review_count,
-     * 10 created_at, 11 source, 12 source_id。
+     * 0 id, 1 front, 2 back, 3 tag, 4 card_group, 5 deck, 6 card_color,
+     * 7 due_time, 8 interval_days, 9 ease_factor, 10 review_count,
+     * 11 created_at, 12 source, 13 source_id。
      */
     FlashCard card;
     card.id = query.value(0).toInt();
     card.front = query.value(1).toString();
     card.back = query.value(2).toString();
     card.tag = query.value(3).toString();
-    card.deck = normalizedDeckName(query.value(4).toString());
-    card.cardColor = normalizedCardColor(query.value(5).toString());
-    card.dueTime = query.value(6).toString();
-    card.intervalDays = normalizedIntervalDays(query.value(7).toInt());
-    card.easeFactor = normalizedEaseFactor(query.value(8).toDouble());
-    card.reviewCount = qMax(0, query.value(9).toInt());
-    card.createdAt = query.value(10).toString();
-    card.source = query.value(11).toString().isEmpty() ? "manual" : query.value(11).toString();
-    card.sourceId = query.value(12).toString();
+    card.group = normalizedGroupName(query.value(4).toString());
+    card.deck = normalizedDeckName(query.value(5).toString());
+    card.cardColor = normalizedCardColor(query.value(6).toString());
+    card.dueTime = query.value(7).toString();
+    card.intervalDays = normalizedIntervalDays(query.value(8).toInt());
+    card.easeFactor = normalizedEaseFactor(query.value(9).toDouble());
+    card.reviewCount = qMax(0, query.value(10).toInt());
+    card.createdAt = query.value(11).toString();
+    card.source = query.value(12).toString().isEmpty() ? "manual" : query.value(12).toString();
+    card.sourceId = query.value(13).toString();
     return card;
 }

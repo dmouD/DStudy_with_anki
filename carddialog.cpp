@@ -12,14 +12,43 @@
 #include <QPair>
 #include <QPixmap>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QTextEdit>
 #include <QVBoxLayout>
+
+namespace {
+QString normalizedDialogGroup(const QString &group)
+{
+    const QString trimmedGroup = group.trimmed();
+    return trimmedGroup.isEmpty() || trimmedGroup == "全部分组" ? QString("默认分组") : trimmedGroup;
+}
+
+QString normalizedDialogDeck(const QString &deck)
+{
+    const QString trimmedDeck = deck.trimmed();
+    return trimmedDeck.isEmpty() || trimmedDeck == "全部牌组" ? QString("默认牌组") : trimmedDeck;
+}
+
+QStringList uniqueDecks(const QStringList &decks)
+{
+    QStringList result;
+    for (const QString &deck : decks) {
+        const QString deckName = normalizedDialogDeck(deck);
+        if (!result.contains(deckName)) {
+            result.append(deckName);
+        }
+    }
+
+    return result;
+}
+}
 
 CardDialog::CardDialog(QWidget *parent)
     : QDialog(parent),
       m_frontEdit(new QLineEdit(this)),
       m_backEdit(new QTextEdit(this)),
       m_tagEdit(new QLineEdit(this)),
+      m_groupCombo(new QComboBox(this)),
       m_deckCombo(new QComboBox(this)),
       m_colorCombo(new QComboBox(this))
 {
@@ -34,6 +63,11 @@ CardDialog::CardDialog(QWidget *parent)
     m_backEdit->setPlaceholderText("写下答案、解释或需要回忆的重点。");
     m_backEdit->setMinimumHeight(150);
     m_tagEdit->setPlaceholderText("例如：Qt 基础 / 高等数学 / 英语单词");
+    m_groupCombo->setEditable(true);
+    m_groupCombo->addItem("默认分组");
+    if (m_groupCombo->lineEdit() != nullptr) {
+        m_groupCombo->lineEdit()->setPlaceholderText("例如：高等数学 / 英语");
+    }
     m_deckCombo->setEditable(true);
     m_deckCombo->addItem("默认牌组");
     if (m_deckCombo->lineEdit() != nullptr) {
@@ -55,6 +89,7 @@ CardDialog::CardDialog(QWidget *parent)
     formLayout->addRow("正面问题:", m_frontEdit);
     formLayout->addRow("背面答案:", m_backEdit);
     formLayout->addRow("标签:", m_tagEdit);
+    formLayout->addRow("分组:", m_groupCombo);
     formLayout->addRow("牌组:", m_deckCombo);
     formLayout->addRow("卡片颜色:", m_colorCombo);
 
@@ -68,6 +103,9 @@ CardDialog::CardDialog(QWidget *parent)
 
     connect(buttonBox, &QDialogButtonBox::accepted, this, &CardDialog::accept);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &CardDialog::reject);
+    connect(m_groupCombo, &QComboBox::currentTextChanged, this, [this]() {
+        refreshDeckComboForCurrentGroup();
+    });
 
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(24, 22, 24, 20);
@@ -95,10 +133,14 @@ QString CardDialog::getTag() const
     return m_tagEdit->text().trimmed();
 }
 
+QString CardDialog::getGroup() const
+{
+    return normalizedDialogGroup(m_groupCombo->currentText());
+}
+
 QString CardDialog::getDeck() const
 {
-    const QString deck = m_deckCombo->currentText().trimmed();
-    return deck.isEmpty() ? QString("默认牌组") : deck;
+    return normalizedDialogDeck(m_deckCombo->currentText());
 }
 
 QString CardDialog::getCardColor() const
@@ -107,24 +149,77 @@ QString CardDialog::getCardColor() const
     return color.isEmpty() ? QString("#ffffff") : color;
 }
 
-void CardDialog::setDecks(const QStringList &decks, const QString &currentDeck)
+void CardDialog::setGroups(const QStringList &groups, const QString &currentGroup)
 {
-    m_deckCombo->clear();
+    m_groupCombo->clear();
 
-    QStringList normalizedDecks;
-    normalizedDecks.append("默认牌组");
-    for (const QString &deck : decks) {
-        const QString trimmedDeck = deck.trimmed();
-        if (!trimmedDeck.isEmpty() && !normalizedDecks.contains(trimmedDeck)) {
-            normalizedDecks.append(trimmedDeck);
+    QStringList normalizedGroups;
+    normalizedGroups.append("默认分组");
+    for (const QString &group : groups) {
+        const QString trimmedGroup = group.trimmed();
+        if (!trimmedGroup.isEmpty() && !normalizedGroups.contains(trimmedGroup)) {
+            normalizedGroups.append(trimmedGroup);
         }
     }
 
-    m_deckCombo->addItems(normalizedDecks);
+    m_groupCombo->addItems(normalizedGroups);
 
-    const QString selectedDeck = currentDeck.trimmed().isEmpty() || currentDeck == "全部牌组"
-                                     ? QString("默认牌组")
-                                     : currentDeck.trimmed();
+    const QString selectedGroup = normalizedDialogGroup(currentGroup);
+    const int index = m_groupCombo->findText(selectedGroup);
+    if (index >= 0) {
+        m_groupCombo->setCurrentIndex(index);
+    } else {
+        m_groupCombo->setCurrentText(selectedGroup);
+    }
+}
+
+void CardDialog::setDecks(const QStringList &decks, const QString &currentDeck)
+{
+    m_decksByGroup.clear();
+    m_decksByGroup.insert(getGroup(), uniqueDecks(decks));
+    refreshDeckComboForCurrentGroup(currentDeck);
+}
+
+void CardDialog::setDecksByGroup(const QMap<QString, QStringList> &decksByGroup,
+                                 const QString &currentGroup,
+                                 const QString &currentDeck)
+{
+    m_decksByGroup.clear();
+
+    QStringList groups;
+    for (auto it = decksByGroup.constBegin(); it != decksByGroup.constEnd(); ++it) {
+        const QString groupName = normalizedDialogGroup(it.key());
+        groups.append(groupName);
+        m_decksByGroup.insert(groupName, uniqueDecks(it.value()));
+    }
+
+    if (!groups.contains(normalizedDialogGroup(currentGroup))) {
+        groups.append(normalizedDialogGroup(currentGroup));
+    }
+
+    setGroups(groups, currentGroup);
+    refreshDeckComboForCurrentGroup(currentDeck);
+}
+
+void CardDialog::refreshDeckComboForCurrentGroup(const QString &preferredDeck)
+{
+    const QString groupName = getGroup();
+    QStringList decks = m_decksByGroup.value(groupName);
+    if (decks.isEmpty()) {
+        decks.append("默认牌组");
+    }
+
+    const QString previousDeck = m_deckCombo->currentText();
+    QString selectedDeck = preferredDeck.trimmed().isEmpty()
+                               ? normalizedDialogDeck(previousDeck)
+                               : normalizedDialogDeck(preferredDeck);
+    if (!decks.contains(selectedDeck)) {
+        selectedDeck = decks.first();
+    }
+
+    QSignalBlocker blocker(m_deckCombo);
+    m_deckCombo->clear();
+    m_deckCombo->addItems(decks);
     const int index = m_deckCombo->findText(selectedDeck);
     if (index >= 0) {
         m_deckCombo->setCurrentIndex(index);

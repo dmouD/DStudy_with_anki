@@ -6,6 +6,9 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSslConfiguration>
+#include <QSslSocket>
+#include <QTimer>
 #include <QUrl>
 
 DeepSeekClient::DeepSeekClient(QObject *parent)
@@ -34,6 +37,12 @@ void DeepSeekClient::analyzePlan(const QString &apiKey, const QString &prompt)
     QNetworkRequest request(QUrl("https://api.deepseek.com/chat/completions"));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", ("Bearer " + trimmedKey).toUtf8());
+    request.setTransferTimeout(15000);
+
+    QSslConfiguration sslConfiguration = request.sslConfiguration();
+    sslConfiguration.setPeerVerifyMode(QSslSocket::VerifyPeer);
+    sslConfiguration.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfiguration);
 
     QJsonArray messages;
     messages.append(QJsonObject{
@@ -54,6 +63,11 @@ void DeepSeekClient::analyzePlan(const QString &apiKey, const QString &prompt)
     body["thinking"] = QJsonObject{{"type", "disabled"}};
 
     QNetworkReply *reply = m_networkManager->post(request, QJsonDocument(body).toJson());
+    QTimer::singleShot(20000, reply, [reply]() {
+        if (reply->isRunning()) {
+            reply->abort();
+        }
+    });
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         handleReply(reply);
         reply->deleteLater();

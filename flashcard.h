@@ -17,6 +17,7 @@ public:
           intervalDays(1),
           easeFactor(2.5),
           reviewCount(0),
+          group("默认分组"),
           deck("默认牌组"),
           cardColor("#ffffff"),
           source("manual")
@@ -27,6 +28,7 @@ public:
     QString front;
     QString back;
     QString tag;
+    QString group;
     QString deck;
     QString cardColor;
     QString dueTime;

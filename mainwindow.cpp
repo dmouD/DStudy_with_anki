@@ -184,6 +184,13 @@ void MainWindow::setupUi()
     m_apiKeyEdit->setObjectName("apiKeyEdit");
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
     m_apiKeyEdit->setPlaceholderText("输入 DeepSeek API Key，仅本次运行使用");
+    QString environmentApiKey = qEnvironmentVariable("DEEPSEEK_API_KEY");
+    if (environmentApiKey.isEmpty()) {
+        environmentApiKey = qEnvironmentVariable("DEESEEK_API_KEY");
+    }
+    if (!environmentApiKey.isEmpty()) {
+        m_apiKeyEdit->setText(environmentApiKey);
+    }
 
     m_aiAnalyzeButton = new QPushButton("AI 分析计划", this);
     m_aiAnalyzeButton->setProperty("buttonRole", "primary");
