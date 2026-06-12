@@ -23,6 +23,7 @@
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QTextEdit>
+#include <QtGlobal>
 #include <QVBoxLayout>
 #include <QEasingCurve>
 #include <QGraphicsOpacityEffect>
@@ -153,7 +154,12 @@ void ReviewWidget::setupUi()
     titleLayout->addWidget(m_tagLabel);
 
     auto *headerLayout = new QHBoxLayout;
+#ifdef Q_OS_WIN
+    headerLayout->setContentsMargins(0, 0, 0, 8);
+    headerLayout->setSpacing(8);
+#else
     headerLayout->setContentsMargins(0, 0, 0, 0);
+#endif
     headerLayout->addLayout(titleLayout, 1);
     headerLayout->addWidget(m_backToPlannerButton);
 
@@ -272,7 +278,11 @@ void ReviewWidget::setupUi()
     reviewLayout->addLayout(ratingLayout);
 
     auto *mainLayout = new QVBoxLayout(this);
+#ifdef Q_OS_WIN
+    mainLayout->setContentsMargins(20, 16, 20, 16);
+#else
     mainLayout->setContentsMargins(22, 20, 22, 20);
+#endif
     mainLayout->setSpacing(12);
     mainLayout->addLayout(headerLayout);
     mainLayout->addWidget(m_libraryWidget, 1);
@@ -282,7 +292,7 @@ void ReviewWidget::setupUi()
 
 void ReviewWidget::setupStyleSheet()
 {
-    setStyleSheet(R"(
+    const QString baseStyleSheet = R"(
         QWidget {
             background: #f5f7fb;
             color: #263244;
@@ -550,7 +560,58 @@ void ReviewWidget::setupStyleSheet()
             border-color: #adc3ea;
             color: #2563eb;
         }
-    )");
+    )";
+
+    const QString windowsStyleSheet =
+#ifdef Q_OS_WIN
+        R"(
+        ReviewWidget,
+        ReviewWidget QWidget {
+            font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+        }
+
+        ReviewWidget {
+            background: #f5f7fb;
+        }
+
+        QLineEdit#deckSearchEdit {
+            min-height: 34px;
+            padding: 6px 12px;
+        }
+
+        QTextEdit {
+            background: #ffffff;
+            border: 1px solid #dbe3ef;
+            border-radius: 10px;
+            padding: 8px;
+        }
+
+        QTextEdit#cardText,
+        QTextEdit#answerText {
+            background: transparent;
+            border: none;
+            padding: 8px 0;
+        }
+
+        QPushButton:disabled,
+        QPushButton[buttonRole="primary"]:disabled,
+        QPushButton[buttonRole="accent"]:disabled,
+        QPushButton[buttonRole="danger"]:disabled,
+        QPushButton[buttonRole="normal"]:disabled,
+        QPushButton[ratingRole="forget"]:disabled,
+        QPushButton[ratingRole="blurry"]:disabled,
+        QPushButton[ratingRole="remember"]:disabled,
+        QPushButton[ratingRole="easy"]:disabled {
+            color: #94a3b8;
+            background: #f8fafc;
+            border-color: #dbe3ef;
+        }
+        )";
+#else
+        QString();
+#endif
+
+    setStyleSheet(baseStyleSheet + windowsStyleSheet);
 }
 
 void ReviewWidget::connectSignals()

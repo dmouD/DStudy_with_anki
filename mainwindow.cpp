@@ -303,7 +303,23 @@ void MainWindow::setupStyleSheet()
      * 这里把颜色、边框、按钮状态集中写在一个函数里，
      * 以后想换风格时只改这一处即可。
      */
-    setStyleSheet(R"(
+    const QString windowsStyleSheet =
+#ifdef Q_OS_WIN
+        R"(
+        QMainWindow {
+            background: #f5f7fb;
+        }
+
+        QWidget#mainBackground,
+        QWidget#mainBackground QWidget {
+            font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+        }
+        )";
+#else
+        QString();
+#endif
+
+    setStyleSheet(windowsStyleSheet + R"(
         QWidget#mainBackground {
             background: #f5f7fb;
             color: #263244;

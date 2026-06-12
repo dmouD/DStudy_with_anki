@@ -1,7 +1,10 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QCoreApplication>
+#include <QPalette>
+#include <QtGlobal>
 
 /*
  * 程序入口。
@@ -16,6 +19,22 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("DStudy");
     QCoreApplication::setApplicationName("DStudy");
+
+#ifdef Q_OS_WIN
+    QApplication::setStyle("Fusion");
+
+    QPalette palette;
+    palette.setColor(QPalette::Window, QColor("#f5f7fb"));
+    palette.setColor(QPalette::WindowText, QColor("#111827"));
+    palette.setColor(QPalette::Base, QColor("#ffffff"));
+    palette.setColor(QPalette::AlternateBase, QColor("#f1f5f9"));
+    palette.setColor(QPalette::Text, QColor("#111827"));
+    palette.setColor(QPalette::Button, QColor("#ffffff"));
+    palette.setColor(QPalette::ButtonText, QColor("#111827"));
+    palette.setColor(QPalette::Highlight, QColor("#2563eb"));
+    palette.setColor(QPalette::HighlightedText, QColor("#ffffff"));
+    app.setPalette(palette);
+#endif
 
     MainWindow window;
     window.resize(1000, 650);

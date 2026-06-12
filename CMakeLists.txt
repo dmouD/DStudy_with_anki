@@ -81,6 +81,27 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
+    set(DSTUDY_VCPKG_ROOT "C:/vcpkg" CACHE PATH "Path to vcpkg root")
+    set(DSTUDY_VCPKG_TRIPLET "${VCPKG_TARGET_TRIPLET}" CACHE STRING "vcpkg triplet used by DStudy")
+    if(NOT DSTUDY_VCPKG_TRIPLET)
+        set(DSTUDY_VCPKG_TRIPLET "x64-mingw-dynamic")
+    endif()
+    set(DSTUDY_ZLIB_DLL
+        "${DSTUDY_VCPKG_ROOT}/installed/${DSTUDY_VCPKG_TRIPLET}/bin/libz.dll"
+        CACHE FILEPATH "Path to the zlib runtime DLL"
+    )
+
+    if(EXISTS "${DSTUDY_ZLIB_DLL}")
+        install(FILES "${DSTUDY_ZLIB_DLL}"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+        message(STATUS "DStudy: libz.dll will be installed from ${DSTUDY_ZLIB_DLL}")
+    else()
+        message(WARNING "DStudy: libz.dll not found at ${DSTUDY_ZLIB_DLL}. The installed program may fail to start.")
+    endif()
+endif()
+
+if(WIN32)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${Qt6_DIR}/../../../bin")
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy-qt
